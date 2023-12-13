@@ -3,6 +3,7 @@
 //
 #define USE_GET_MILLISECOND_TIMER
 #include <FastLED.h>
+#include <TMC2209.h>
 //
 
 #include <ESPNOWPixels.h>
@@ -11,6 +12,7 @@
 #include "gradientPalettes.h"
 
 #define NUM_LEDS 300
+// D4 is the serial TX pin used for Serial1 on the d1 Mini.  This would mean we would need to put pixels on a different pin : (
 #define DATA_PIN D4
 static constexpr uint8_t kBroadcastAddress[]{0xff, 0xff, 0xff,
                                              0xff, 0xff, 0xff};
@@ -91,6 +93,23 @@ std::vector<std::function<void()>> animations = {
     juggle_pal,     //
     confetti_pal,   //
 };
+
+// stepper instantiation
+// Instantiate TMC2209
+HardwareSerial & serial_stream = Serial1;
+
+const int32_t RUN_VELOCITY = 20000;
+const int32_t STOP_VELOCITY = 0;
+
+// current values may need to be reduced to prevent overheating depending on
+// specific motor and power supply voltage
+const uint8_t RUN_CURRENT_PERCENT = 100;
+
+TMC2209 stepper_driver;
+bool invert_direction = false;
+int32_t stepper_map_value = 0;
+
+
 
 static constexpr std::string_view kMillisHeader = "MILLIS";
 static constexpr size_t kMillisMsgLen =
@@ -174,10 +193,19 @@ void setup() {
   WifiEspNow.onReceive(handleMessage, nullptr);
   WifiEspNow.begin();
   WifiEspNow.addPeer(kBroadcastAddress);
+  // add stepper setup
+  stepper_driver.setup(serial_stream);
+
+  stepper_driver.setRunCurrent(RUN_CURRENT_PERCENT);
+  stepper_driver.enableCoolStep();
+  stepper_driver.enable();
+  stepper_driver.moveAtVelocity(20000);
 }
 
 void updatePalette();
 void draw();
+void updateStepperSpeed();
+void moveStepper();
 
 void loop() {
   auto frame = std::move(latest_frame);
@@ -189,12 +217,17 @@ void loop() {
       leds[beatsin16(1 + 1 * i, 0, NUM_LEDS)] |= CHSV(dothue, 128, 64);
       dothue += 64;
     }
+    // set to max speed with show.
+    //leds[NUM_LEDS -1].b = 254;
     FastLED.show();
   }
   if (!last_frame_millis || millis() - *last_frame_millis > 10000) {
     EVERY_N_MILLIS(17) {
       updatePalette();
       draw();
+      // set to max speed with show.
+      // I think this is for the 'headless' use case where we just want them to spin
+      leds[NUM_LEDS -1].b = 254;
       FastLED.show();
     }
   }
@@ -220,6 +253,8 @@ void loop() {
     auto current_millis = get_millisecond_timer();
     Serial.print("Current millis: ");
     Serial.println(current_millis);
+    updateStepperSpeed();
+    moveStepper();
   }
 }
 
@@ -236,6 +271,39 @@ void draw() {
   auto& animation =
       animations[(seconds / ANIMATION_CHANGE_INTERVAL) % animations.size()];
   animation();
+}
+
+void updateStepperSpeed() {
+  // this is a hack.
+  // The idea is to just take the blue channel from the last led in the LED array of arrays
+  //  If we just bump the number of pixels + 1, we can address that directly in transmit and use it to  control the stepper speed
+  // right now its getting a random value from the pattern and mapping that to a very slow speed range
+  // we could also hard code a static value nearby show as commented above, or add to specific patterns to force the last pixel blue channel to a given speed.
+  // 20000 is pretty slow but fine and works at a large voltage range
+  stepper_map_value = map(leds[NUM_LEDS -1].b, 0,255,STOP_VELOCITY,20000);
+  Serial.println(stepper_map_value);
+  // we could probably do a direction here using the red or green channel
+
+  if (leds[NUM_LEDS -1].r <= 100){
+    invert_direction = true;
+  }
+
+  // this flips the direction if the above condition sets the flag to true.
+  // just a copy of the move at velocity example but it could be better
+  if (invert_direction){
+    stepper_driver.enableInverseMotorDirection();
+  }
+  else
+  {
+    stepper_driver.disableInverseMotorDirection();
+  }
+  invert_direction = not invert_direction;
+  
+}
+
+void moveStepper() {
+  // move at velocity
+  stepper_driver.moveAtVelocity(stepper_map_value);
 }
 
 void rippless() {
